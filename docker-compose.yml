@@ -1,0 +1,28 @@
+version: "3.8"
+services:
+  pdf_service:
+    build: ./pdf_service
+    env_file:
+      - ./pdf_service/.env
+    ports:
+      - "8000:8000"
+
+  rag_module:
+    build: ./rag_module
+    env_file:
+      - ./rag_module/.env
+    ports:
+      - "8001:8001"
+
+  aws_service:
+    build: ./aws_service
+    env_file:
+      - ./.env
+    ports:
+      - "8002:8002"
+
+  metrics_stub:
+    image: "python:3.11-slim"
+    volumes: ["./metrics_lambda:/app"]
+    command: ["python","-u","/app/local_metrics_stub.py"]
+    ports: ["9000:9000"]

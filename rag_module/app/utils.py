@@ -3,7 +3,7 @@ import time
 import uuid
 import requests
 from sentence_transformers import SentenceTransformer
-import pinecone
+from pinecone import Pinecone, ServerlessSpec
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 
 # Load environment
@@ -19,10 +19,24 @@ METRICS_LAMBDA_URL = os.getenv("METRICS_LAMBDA_URL")
 embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
 
 # Initialize Pinecone
-pinecone.init(api_key=PINECONE_API_KEY, environment=PINECONE_ENV)
-if PINECONE_INDEX_NAME not in pinecone.list_indexes():
-    pinecone.create_index(PINECONE_INDEX_NAME, dimension=384)  # MiniLM dimension
-index = pinecone.Index(PINECONE_INDEX_NAME)
+pc = Pinecone(api_key=PINECONE_API_KEY)
+
+# Check if index exists and create if needed
+if PINECONE_INDEX_NAME not in pc.list_indexes().names():
+    pc.create_index(
+        name=PINECONE_INDEX_NAME,
+        dimension=384,  # MiniLM dimension
+        metric='cosine',
+        spec=ServerlessSpec(
+            cloud='aws',
+            region='us-east-1'  
+        )
+    )
+    # Wait for index to be ready
+    time.sleep(1)
+
+# Get index
+index = pc.Index(PINECONE_INDEX_NAME)
 
 # Text chunker
 text_splitter = RecursiveCharacterTextSplitter(

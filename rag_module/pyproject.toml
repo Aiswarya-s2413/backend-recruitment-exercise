@@ -20,6 +20,10 @@ langchain = "^0.3.27"
 langchain-text-splitters = "^0.3.11"
 langchain-core = "^0.3.28"
 langchain-community = "^0.3.25"
+openai = "^1.54.0"
+python-jose = {extras = ["cryptography"], version = "^3.3.0"}
+passlib = {extras = ["bcrypt"], version = "^1.7.4"}
+boto3 = "^1.35.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.4.2"

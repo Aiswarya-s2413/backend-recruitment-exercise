@@ -11,6 +11,7 @@ class DocumentResponse(DocumentBase):
     doc_id: str
     upload_timestamp: datetime
     extracted_text: str
+    file_location: str
 
     class Config:
         orm_mode = True

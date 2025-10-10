@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.13-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
@@ -14,7 +14,7 @@ RUN pip install --no-cache-dir poetry
 COPY pyproject.toml poetry.lock* /app/
 
 RUN poetry config virtualenvs.create false \
- && poetry install --no-interaction --no-ansi
+ && poetry install --only main --no-interaction --no-ansi --no-root
 
 COPY . /app
 

@@ -8,20 +8,25 @@ import boto3
 from botocore.exceptions import ClientError
 import requests
 from datetime import datetime
+from app import auth
 
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
-LOCALSTACK_ENDPOINT = os.getenv("LOCALSTACK_ENDPOINT", "http://localstack:4566")
+LOCALSTACK_ENDPOINT = os.getenv("LOCALSTACK_ENDPOINT")
+USE_LOCALSTACK = bool(LOCALSTACK_ENDPOINT)  # If LOCALSTACK_ENDPOINT is set, use LocalStack
 DYNAMODB_TABLE_DOCUMENTS = os.getenv("DYNAMODB_TABLE_DOCUMENTS", "DocumentsMetadata")
 S3_BUCKET = os.getenv("S3_BUCKET", "pdf-service-bucket")
 RAG_MODULE_URL = os.getenv("RAG_MODULE_URL", "http://rag_module:8001")
 METRICS_LAMBDA_URL = os.getenv("METRICS_LAMBDA_URL", "http://metrics_stub:9000/metrics")
+SERVICE_TOKEN = os.getenv("SERVICE_TOKEN")
 
-# boto3 clients/resources pointing to LocalStack
+# boto3 clients/resources
 boto3_kwargs = {"region_name": AWS_REGION}
-# Add endpoint to client/resource to point to LocalStack
-dynamodb_client = boto3.client("dynamodb", endpoint_url=LOCALSTACK_ENDPOINT, **boto3_kwargs)
-dynamodb = boto3.resource("dynamodb", endpoint_url=LOCALSTACK_ENDPOINT, **boto3_kwargs)
-s3 = boto3.client("s3", endpoint_url=LOCALSTACK_ENDPOINT, **boto3_kwargs)
+if USE_LOCALSTACK:
+    boto3_kwargs["endpoint_url"] = LOCALSTACK_ENDPOINT
+
+dynamodb_client = boto3.client("dynamodb", **boto3_kwargs)
+dynamodb = boto3.resource("dynamodb", **boto3_kwargs)
+s3 = boto3.client("s3", **boto3_kwargs)
 
 app = FastAPI(title="aws_service")
 
@@ -37,14 +42,18 @@ class UpdateDocument(BaseModel):
     s3_key: Optional[str] = None
 
 # Ensure DynamoDB table and S3 bucket exist at startup
-def ensure_dynamodb_table(table_name: str):
+def ensure_dynamodb_table(table_name: str, key_schema=None, attribute_definitions=None):
+    if key_schema is None:
+        key_schema = [{"AttributeName": "doc_id", "KeyType": "HASH"}]
+    if attribute_definitions is None:
+        attribute_definitions = [{"AttributeName": "doc_id", "AttributeType": "S"}]
     existing = dynamodb_client.list_tables().get("TableNames", [])
     if table_name not in existing:
         print(f"Creating DynamoDB table: {table_name}")
         dynamodb_client.create_table(
             TableName=table_name,
-            KeySchema=[{"AttributeName": "doc_id", "KeyType": "HASH"}],
-            AttributeDefinitions=[{"AttributeName": "doc_id", "AttributeType": "S"}],
+            KeySchema=key_schema,
+            AttributeDefinitions=attribute_definitions,
             BillingMode="PAY_PER_REQUEST",
         )
         # Wait until table exists
@@ -62,12 +71,22 @@ def ensure_s3_bucket(bucket_name: str):
 @app.on_event("startup")
 def startup_event():
     ensure_dynamodb_table(DYNAMODB_TABLE_DOCUMENTS)
-    ensure_dynamodb_table(os.getenv("METRICS_TABLE", "AgentMetrics"))
+    ensure_dynamodb_table(
+        os.getenv("METRICS_TABLE", "AgentMetrics"),
+        key_schema=[
+            {"AttributeName": "run_id", "KeyType": "HASH"},
+            {"AttributeName": "timestamp", "KeyType": "RANGE"}
+        ],
+        attribute_definitions=[
+            {"AttributeName": "run_id", "AttributeType": "S"},
+            {"AttributeName": "timestamp", "AttributeType": "S"}
+        ]
+    )
     ensure_s3_bucket(S3_BUCKET)
 
 # CRUD: create metadata
 @app.post("/aws/documents", status_code=201)
-def create_document(item: DocumentItem = Body(...)):
+def create_document(item: DocumentItem = Body(...), current_user: str = Depends(auth.verify_token)):
     table = dynamodb.Table(DYNAMODB_TABLE_DOCUMENTS)
     now = datetime.utcnow().isoformat()
     doc = {
@@ -82,7 +101,7 @@ def create_document(item: DocumentItem = Body(...)):
 
 # Read
 @app.get("/aws/documents/{doc_id}")
-def get_document(doc_id: str):
+def get_document(doc_id: str, current_user: str = Depends(auth.verify_token)):
     table = dynamodb.Table(DYNAMODB_TABLE_DOCUMENTS)
     resp = table.get_item(Key={"doc_id": doc_id})
     item = resp.get("Item")
@@ -92,7 +111,7 @@ def get_document(doc_id: str):
 
 # Update
 @app.put("/aws/documents/{doc_id}")
-def update_document(doc_id: str, body: UpdateDocument = Body(...)):
+def update_document(doc_id: str, body: UpdateDocument = Body(...), current_user: str = Depends(auth.verify_token)):
     table = dynamodb.Table(DYNAMODB_TABLE_DOCUMENTS)
     expression_items = []
     expr_attr_values = {}
@@ -116,7 +135,7 @@ def update_document(doc_id: str, body: UpdateDocument = Body(...)):
 
 # Delete (with optional S3 delete)
 @app.delete("/aws/documents/{doc_id}")
-def delete_document(doc_id: str, delete_s3: bool = Query(False)):
+def delete_document(doc_id: str, delete_s3: bool = Query(False), current_user: str = Depends(auth.verify_token)):
     table = dynamodb.Table(DYNAMODB_TABLE_DOCUMENTS)
     resp = table.get_item(Key={"doc_id": doc_id})
     item = resp.get("Item")
@@ -135,7 +154,7 @@ def delete_document(doc_id: str, delete_s3: bool = Query(False)):
 
 # Trigger RAG indexing for a doc_id
 @app.post("/aws/documents/{doc_id}/index")
-def index_document(doc_id: str):
+def index_document(doc_id: str, current_user: str = Depends(auth.verify_token)):
     url = f"{RAG_MODULE_URL}/rag/index"
     payload = [doc_id]
     try:
@@ -147,7 +166,7 @@ def index_document(doc_id: str):
 
 # Forward query to RAG module
 @app.post("/aws/query")
-def aws_query(body: Dict[str, Any] = Body(...)):
+def aws_query(body: Dict[str, Any] = Body(...), current_user: str = Depends(auth.verify_token)):
     url = f"{RAG_MODULE_URL}/rag/query"
     try:
         resp = requests.post(url, json=body, timeout=60)

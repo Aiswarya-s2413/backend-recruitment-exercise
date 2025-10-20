@@ -1,11 +1,11 @@
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 from typing import List
 import uuid
 
 class IndexRequest(BaseModel):
-    document_ids: List[str] = Field(..., min_items=1, max_items=100)
+    document_ids: List[str] = Field(..., min_length=1, max_length=100)
 
-    @validator('document_ids')
+    @field_validator('document_ids')
     def validate_document_ids(cls, v):
         if not v:
             raise ValueError("document_ids cannot be empty")
@@ -21,10 +21,10 @@ class IndexRequest(BaseModel):
         return v
 
 class QueryRequest(BaseModel):
-    document_ids: List[str] = Field(..., min_items=1, max_items=50)
+    document_ids: List[str] = Field(..., min_length=1, max_length=50)
     question: str = Field(..., min_length=1, max_length=1000)
 
-    @validator('document_ids')
+    @field_validator('document_ids')
     def validate_document_ids(cls, v):
         if not v:
             raise ValueError("document_ids cannot be empty")
@@ -39,7 +39,7 @@ class QueryRequest(BaseModel):
                 raise ValueError(f"Invalid document ID: {doc_id}")
         return v
 
-    @validator('question')
+    @field_validator('question')
     def validate_question(cls, v):
         if not v.strip():
             raise ValueError("Question cannot be empty")

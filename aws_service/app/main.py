@@ -2,22 +2,30 @@ import os
 import json
 import time
 from typing import Optional, Dict, Any
-from fastapi import FastAPI, HTTPException, Body, Query
+from fastapi import FastAPI, HTTPException, Body, Query, Depends
 from pydantic import BaseModel
 import boto3
 from botocore.exceptions import ClientError
 import requests
-from datetime import datetime
-from app import auth
+from datetime import datetime, timezone
+from . import auth
 
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 LOCALSTACK_ENDPOINT = os.getenv("LOCALSTACK_ENDPOINT")
-USE_LOCALSTACK = bool(LOCALSTACK_ENDPOINT)  # If LOCALSTACK_ENDPOINT is set, use LocalStack
+USE_LOCALSTACK = bool(LOCALSTACK_ENDPOINT)
 DYNAMODB_TABLE_DOCUMENTS = os.getenv("DYNAMODB_TABLE_DOCUMENTS", "DocumentsMetadata")
 S3_BUCKET = os.getenv("S3_BUCKET", "pdf-service-bucket")
 RAG_MODULE_URL = os.getenv("RAG_MODULE_URL", "http://rag_module:8001")
 METRICS_LAMBDA_URL = os.getenv("METRICS_LAMBDA_URL", "http://metrics_stub:9000/metrics")
 SERVICE_TOKEN = os.getenv("SERVICE_TOKEN")
+
+# Headers for inter-service communication
+# FIXED: Ensure headers are always set, even if SERVICE_TOKEN is None
+def get_service_headers():
+    """Get headers for inter-service communication"""
+    if SERVICE_TOKEN:
+        return {"Authorization": f"Bearer {SERVICE_TOKEN}"}
+    return {}
 
 # boto3 clients/resources
 boto3_kwargs = {"region_name": AWS_REGION}
@@ -70,6 +78,12 @@ def ensure_s3_bucket(bucket_name: str):
 
 @app.on_event("startup")
 def startup_event():
+    # ADDED: Log SERVICE_TOKEN status for debugging
+    if SERVICE_TOKEN:
+        print(f"SERVICE_TOKEN is configured (length: {len(SERVICE_TOKEN)})")
+    else:
+        print("WARNING: SERVICE_TOKEN is not set - inter-service calls may fail if RAG module requires auth")
+    
     ensure_dynamodb_table(DYNAMODB_TABLE_DOCUMENTS)
     ensure_dynamodb_table(
         os.getenv("METRICS_TABLE", "AgentMetrics"),
@@ -88,7 +102,7 @@ def startup_event():
 @app.post("/aws/documents", status_code=201)
 def create_document(item: DocumentItem = Body(...), current_user: str = Depends(auth.verify_token)):
     table = dynamodb.Table(DYNAMODB_TABLE_DOCUMENTS)
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     doc = {
         "doc_id": item.doc_id,
         "filename": item.filename,
@@ -156,12 +170,19 @@ def delete_document(doc_id: str, delete_s3: bool = Query(False), current_user: s
 @app.post("/aws/documents/{doc_id}/index")
 def index_document(doc_id: str, current_user: str = Depends(auth.verify_token)):
     url = f"{RAG_MODULE_URL}/rag/index"
-    payload = [doc_id]
+    payload = {"document_ids": [doc_id]}
     try:
-        resp = requests.post(url, json=payload, timeout=30)
+        # FIXED: Use function to get headers dynamically
+        headers = get_service_headers()
+        print(f"Calling RAG module at {url} with headers: {list(headers.keys())}")
+        resp = requests.post(url, json=payload, headers=headers, timeout=30)
         resp.raise_for_status()
         return {"status": "ok", "rag_response": resp.json()}
+    except requests.exceptions.HTTPError as e:
+        print(f"RAG module returned error: {e.response.status_code} - {e.response.text}")
+        raise HTTPException(status_code=e.response.status_code, detail=f"RAG module error: {e.response.text}")
     except Exception as e:
+        print(f"Error calling RAG module: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # Forward query to RAG module
@@ -169,8 +190,14 @@ def index_document(doc_id: str, current_user: str = Depends(auth.verify_token)):
 def aws_query(body: Dict[str, Any] = Body(...), current_user: str = Depends(auth.verify_token)):
     url = f"{RAG_MODULE_URL}/rag/query"
     try:
-        resp = requests.post(url, json=body, timeout=60)
+        # FIXED: Use function to get headers dynamically
+        headers = get_service_headers()
+        resp = requests.post(url, json=body, headers=headers, timeout=60)
         resp.raise_for_status()
         return resp.json()
+    except requests.exceptions.HTTPError as e:
+        print(f"RAG module returned error: {e.response.status_code} - {e.response.text}")
+        raise HTTPException(status_code=e.response.status_code, detail=f"RAG module error: {e.response.text}")
     except Exception as e:
+        print(f"Error calling RAG module: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))

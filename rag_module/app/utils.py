@@ -1,5 +1,6 @@
 import os
 import time
+import logging
 import uuid
 import requests
 import json
@@ -8,11 +9,17 @@ import boto3
 from sentence_transformers import SentenceTransformer
 from pinecone import Pinecone, ServerlessSpec
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from openai import OpenAI
+from huggingface_hub import InferenceClient
 
-# Load environment
+from . import auth
+from requests.auth import HTTPBasicAuth
+
+logger = logging.getLogger(__name__)
+
+PDF_SERVICE_USER = os.getenv("PDF_SERVICE_USER", "admin")
+PDF_SERVICE_PASSWORD = os.getenv("PDF_SERVICE_PASSWORD", "password")
+
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
-PINECONE_ENV = os.getenv("PINECONE_ENV")
 PINECONE_INDEX_NAME = os.getenv("PINECONE_INDEX_NAME")
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", 500))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", 50))
@@ -22,18 +29,29 @@ METRICS_LAMBDA_NAME = os.getenv("METRICS_LAMBDA_NAME")
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 LOCALSTACK_ENDPOINT = os.getenv("LOCALSTACK_ENDPOINT")
 USE_LOCALSTACK = bool(LOCALSTACK_ENDPOINT)
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
+if not HUGGINGFACE_API_KEY:
+    raise ValueError("HUGGINGFACE_API_KEY environment variable not set. Please provide a valid Hugging Face API key.")
+
 PDF_SERVICE_URL = os.getenv("PDF_SERVICE_URL", "http://pdf_service:8000")
+SERVICE_TOKEN = os.getenv("SERVICE_TOKEN")
+
+# LLM model to use - Must support chat completion
+# Available free models that support chat completion:
+LLM_MODEL = "meta-llama/Llama-3.2-1B-Instruct"  # Fast, good for Q&A
+# Alternatives:
+# LLM_MODEL = "microsoft/Phi-3.5-mini-instruct"
+# LLM_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
+# LLM_MODEL = "google/gemma-2-2b-it"
 
 # Basic auth for inter-service calls
-SERVICE_AUTH = "Basic " + base64.b64encode(b"admin:password").decode()
-SERVICE_HEADERS = {"Authorization": SERVICE_AUTH}
+SERVICE_HEADERS = {"Authorization": f"Bearer {SERVICE_TOKEN}"} if SERVICE_TOKEN else {}
 
 # Initialize embedding model
 embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
 
-# Initialize OpenAI client
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
+# Initialize Hugging Face Inference Client
+hf_client = InferenceClient(token=HUGGINGFACE_API_KEY)
 
 # Initialize AWS Lambda client
 lambda_kwargs = {"region_name": AWS_REGION}
@@ -95,30 +113,38 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
 
 # Function to get document text from PDF service
 def get_document_text(doc_id: str) -> str:
-    try:
-        response = requests.get(f"{PDF_SERVICE_URL}/pdf/documents/{doc_id}", headers=SERVICE_HEADERS)
-        response.raise_for_status()
-        doc_data = response.json()
-        return doc_data["extracted_text"]
-    except requests.RequestException as e:
-        raise Exception(f"Failed to retrieve document {doc_id}: {str(e)}")
+    url = f"{PDF_SERVICE_URL}/pdf/documents/{doc_id}"
+    resp = requests.get(url, auth=HTTPBasicAuth(PDF_SERVICE_USER, PDF_SERVICE_PASSWORD))
+    resp.raise_for_status()
+    return resp.json()["extracted_text"]
 
-# Function to call LLM
+# Function to call LLM - FIXED: Using chat_completion instead of text_generation
 def call_llm(prompt: str) -> dict:
     try:
-        response = openai_client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": prompt}],
+        # Use chat_completion API (the new standard as of July 2025)
+        messages = [
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ]
+        
+        response = hf_client.chat_completion(
+            messages=messages,
+            model=LLM_MODEL,
             max_tokens=500,
-            temperature=0.1
+            temperature=0.7,
         )
-        answer = response.choices[0].message.content.strip()
-        tokens_consumed = response.usage.prompt_tokens
-        tokens_generated = response.usage.completion_tokens
+        
+        # Extract the answer from the response
+        answer = response.choices[0].message.content
+        
+        # The Inference API does not return token counts in the free tier, so we'll use 0
         return {
             "answer": answer,
-            "tokens_consumed": tokens_consumed,
-            "tokens_generated": tokens_generated
+            "tokens_consumed": 0,
+            "tokens_generated": 0
         }
     except Exception as e:
-        raise Exception(f"LLM call failed: {str(e)}")
+        logger.error(f"LLM call failed: {e}", exc_info=True)
+        raise

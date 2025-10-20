@@ -11,54 +11,15 @@ This directory contains unit tests for all services in the backend recruitment e
 
 ## Running Tests
 
-### Prerequisites
-
-1. Install dependencies for each service:
-   ```bash
-   # PDF Service
-   cd ../pdf_service
-   poetry install
-
-   # RAG Module
-   cd ../rag_module
-   poetry install
-
-   # AWS Service
-   cd ../aws_service
-   poetry install
-
-   # Metrics Lambda
-   cd ../metrics_lambda
-   poetry install
-   ```
-
-### Run Individual Service Tests
-
-```bash
-# PDF Service tests
-cd ../pdf_service
-pytest ../../tests/test_pdf_service.py -v
-
-# RAG Module tests
-cd ../rag_module
-pytest ../../tests/test_rag_module.py -v
-
-# AWS Service tests
-cd ../aws_service
-pytest ../../tests/test_aws_service.py -v
-
-# Metrics Lambda tests
-cd ../metrics_lambda
-pytest ../../tests/test_metrics_lambda.py -v
-```
-
-### Run All Tests
+The recommended way to run all tests is to use the `run_all_tests.sh` script in the project's root directory. This script handles dependency installation and execution for each service automatically.
 
 From the project root:
 ```bash
-# Run all tests (requires all services to have dependencies installed)
-pytest tests/ -v
+chmod +x run_all_tests.sh
+./run_all_tests.sh
 ```
+
+If you need to run tests for a single service, you can do so by navigating to its directory and using `poetry run pytest`. For detailed instructions, please refer to the main `README.md` in the project root.
 
 ## Test Coverage
 

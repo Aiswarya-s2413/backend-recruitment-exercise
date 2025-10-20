@@ -13,9 +13,6 @@ load_dotenv()
 UPLOAD_DIR = "./uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-# Initialize DB
-models.Base.metadata.create_all(bind=database.engine)
-
 app = FastAPI(title="PDF Service")
 
 # S3 client setup
@@ -28,6 +25,11 @@ s3_client = boto3.client(
     endpoint_url=localstack_endpoint if localstack_endpoint else None
 )
 s3_bucket = os.getenv("S3_BUCKET", "pdf-service-bucket")
+
+@app.on_event("startup")
+def on_startup():
+    # Create DB tables
+    models.Base.metadata.create_all(bind=database.engine)
 
 def get_db():
     db = database.SessionLocal()
@@ -58,18 +60,13 @@ async def upload_pdfs(files: list[UploadFile] = File(...), current_user: str = D
         # Generate doc_id
         doc_id = str(uuid.uuid4())
 
-        # Store file
-        if localstack_endpoint:
-            # Local storage
-            file_path = os.path.join(UPLOAD_DIR, file.filename)
-            with open(file_path, "wb") as f:
-                f.write(content)
-            file_location = f"local:{file_path}"
-        else:
-            # S3 storage
+        # Store file in S3 (or LocalStack S3 if configured)
+        try:
             key = f"{doc_id}/{file.filename}"
             s3_client.put_object(Bucket=s3_bucket, Key=key, Body=content)
             file_location = f"s3:{key}"
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to upload to S3: {str(e)}")
 
         # Store metadata
         db_doc = crud.create_document(db, doc_id=doc_id, filename=file.filename, extracted_text=text, file_location=file_location)

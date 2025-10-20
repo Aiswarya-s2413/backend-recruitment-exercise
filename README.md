@@ -15,6 +15,22 @@ A multi-service RAG (Retrieval-Augmented Generation) system with AWS integration
 2. Copy `.env.example` to `.env` and configure environment variables.
 3. Run with Docker Compose: `docker-compose up`
 
+## Testing
+
+The project has a comprehensive test suite for each service. To run all tests for the entire project, use the provided helper script. This script will automatically navigate into each service's directory, install its dependencies, and run its tests.
+
+### Prerequisites
+
+Ensure you have `bash` and `poetry` installed on your system.
+
+### Run All Tests
+
+From the project root directory, make the script executable and run it:
+```bash
+chmod +x run_all_tests.sh
+./run_all_tests.sh
+```
+
 ## Production Deployment
 
 For production AWS deployments:

@@ -1,30 +1,36 @@
-from fastapi import HTTPException, Depends
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+import secrets
 import os
-from .logger import get_logger
-from .exceptions import AuthenticationError, AuthorizationError
 
-# Logger
-logger = get_logger(__name__)
+# Set auto_error=False to handle missing token manually and return 401
+http_bearer_auth = HTTPBearer(auto_error=False)
 
-# Security scheme - switched to HTTP Basic for simpler manual testing
-security = HTTPBasic()
+async def verify_token(creds: HTTPAuthorizationCredentials = Depends(http_bearer_auth)):
+    """
+    Verify the provided service token.
+    """
+    # Get SERVICE_TOKEN inside the function to ensure we get the latest value
+    SERVICE_TOKEN = os.getenv("SERVICE_TOKEN")
+    
+    # If no service token is configured, allow access (for local development)
+    if not SERVICE_TOKEN:
+        return "anonymous"
 
-# For simplicity, we'll use a dummy user. In production, you'd have a user database.
-def authenticate_user(username: str, password: str):
-    logger.info(f"Attempting authentication for user: {username}")
-    # Dummy authentication - replace with real user lookup
-    if username == "admin" and password == "password":
-        logger.info(f"Authentication successful for user: {username}")
-        return {"username": username}
-    logger.warning(f"Authentication failed for user: {username}")
-    return False
-
-def verify_token(credentials: HTTPBasicCredentials = Depends(security)):
-    logger.info("Verifying authentication credentials")
-    user = authenticate_user(credentials.username, credentials.password)
-    if not user:
-        logger.warning("Authentication failed")
-        raise AuthenticationError("Invalid authentication credentials")
-    logger.info(f"Authentication successful for user: {user['username']}")
-    return user["username"]
+    # If SERVICE_TOKEN is configured, credentials are REQUIRED
+    if creds is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing service token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    # Verify the token matches using constant-time comparison
+    if not secrets.compare_digest(creds.credentials, SERVICE_TOKEN):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing service token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    return "service"

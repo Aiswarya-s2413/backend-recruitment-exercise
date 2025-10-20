@@ -1,21 +1,43 @@
 import pytest
 import os
-from fastapi.testclient import TestClient
+from io import BytesIO
+from unittest.mock import MagicMock, patch
+import uuid
+
+# Step 1: Create test database and patch BEFORE any app imports
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from app.database import Base
-from app.main import app, get_db
-from app import models
-import uuid
-import io
 
-# Test database setup
-TEST_DATABASE_URL = "sqlite:///./test_pdf_metadata.db"
+TEST_DATABASE_URL = "sqlite:///test.db"
+test_engine = create_engine(
+    TEST_DATABASE_URL, 
+    connect_args={"check_same_thread": False},
+    echo=False
+)
+TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_engine)
 
-engine = create_engine(TEST_DATABASE_URL, connect_args={"check_same_thread": False})
-TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+# Step 2: Patch at import time using environment or direct module patching
+# Import and immediately patch the database module
+import pdf_service.app.database as db_module
+original_engine = db_module.engine
+original_session = db_module.SessionLocal
 
+db_module.engine = test_engine
+db_module.SessionLocal = TestingSessionLocal
+
+# Step 3: Now import everything else
+from pdf_service.app import models
+
+# Step 5: Import main after everything is set up
+from pdf_service.app.main import app, get_db
+import pdf_service.app.main as main_module
+
+# Also patch the engine on the main module itself
+main_module.database.engine = test_engine
+
+# Step 6: Override database dependency
 def override_get_db():
+    """Override database dependency to use test database"""
     db = TestingSessionLocal()
     try:
         yield db
@@ -24,33 +46,36 @@ def override_get_db():
 
 app.dependency_overrides[get_db] = override_get_db
 
+# Step 7: Mock S3 client
+mock_s3_client = MagicMock()
+mock_s3_client.put_object.return_value = None
+mock_s3_client.upload_fileobj.return_value = None
+main_module.s3_client = mock_s3_client
+
+# Step 8: Create test client
+from fastapi.testclient import TestClient
 client = TestClient(app)
 
-@pytest.fixture(scope="function", autouse=True)
-def setup_database():
-    # Create tables
-    Base.metadata.create_all(bind=engine)
-    yield
-    # Drop tables and clean up
-    Base.metadata.drop_all(bind=engine)
-    # Remove test db file if exists
-    test_db_path = "./test_pdf_metadata.db"
-    if os.path.exists(test_db_path):
-        try:
-            os.remove(test_db_path)
-        except PermissionError:
-            pass  # May be locked on Windows
 
-@pytest.fixture
-def auth_token():
-    # Use the dummy credentials from auth.py
-    response = client.post("/auth/login", data={"username": "admin", "password": "password"})
-    assert response.status_code == 200
-    return response.json()["access_token"]
+import os
+
+@pytest.fixture(autouse=True)
+def setup_database():
+    """Create and drop database tables for each test"""
+    # Create tables
+    models.Base.metadata.create_all(bind=test_engine)
+    yield
+    # Drop tables
+    models.Base.metadata.drop_all(bind=test_engine)
+
+@pytest.fixture(scope="module")
+def basic_auth_creds():
+    """Provides the username/password tuple for HTTP Basic Auth."""
+    return ("admin", "password")
+
 
 def create_sample_pdf():
     """Create a minimal PDF for testing"""
-    # Simple PDF bytes - this is a valid minimal PDF
     pdf_content = b"""%PDF-1.4
 1 0 obj
 <<
@@ -113,17 +138,15 @@ trailer
 startxref
 459
 %%EOF"""
-    from io import BytesIO
     return BytesIO(pdf_content)
 
-def test_upload_pdf(auth_token):
+
+def test_upload_pdf(basic_auth_creds):
     """Test uploading a sample PDF and verifying doc_id is returned"""
     pdf_content = create_sample_pdf()
 
     files = {"files": ("test.pdf", pdf_content, "application/pdf")}
-    headers = {"Authorization": f"Bearer {auth_token}"}
-
-    response = client.post("/pdf/upload", files=files, headers=headers)
+    response = client.post("/pdf/upload", files=files, auth=basic_auth_creds)
 
     assert response.status_code == 200
     data = response.json()
@@ -139,20 +162,19 @@ def test_upload_pdf(auth_token):
     assert "extracted_text" in doc
     assert len(doc["extracted_text"]) > 0  # Basic check that text was extracted
 
-def test_retrieve_document_metadata(auth_token):
+
+def test_retrieve_document_metadata(basic_auth_creds):
     """Test retrieving metadata and extracted text for a doc_id"""
     # First upload a PDF to get a doc_id
     pdf_content = create_sample_pdf()
 
     files = {"files": ("test.pdf", pdf_content, "application/pdf")}
-    headers = {"Authorization": f"Bearer {auth_token}"}
-
-    upload_response = client.post("/pdf/upload", files=files, headers=headers)
+    upload_response = client.post("/pdf/upload", files=files, auth=basic_auth_creds)
     assert upload_response.status_code == 200
     doc_id = upload_response.json()[0]["doc_id"]
 
     # Now retrieve the document
-    response = client.get(f"/pdf/documents/{doc_id}", headers=headers)
+    response = client.get(f"/pdf/documents/{doc_id}", auth=basic_auth_creds)
 
     assert response.status_code == 200
     doc = response.json()
@@ -162,32 +184,31 @@ def test_retrieve_document_metadata(auth_token):
     assert "extracted_text" in doc
     assert len(doc["extracted_text"]) > 0
 
-def test_retrieve_nonexistent_document(auth_token):
+
+def test_retrieve_nonexistent_document(basic_auth_creds):
     """Test retrieving a document that doesn't exist"""
     fake_doc_id = str(uuid.uuid4())
-    headers = {"Authorization": f"Bearer {auth_token}"}
-
-    response = client.get(f"/pdf/documents/{fake_doc_id}", headers=headers)
+    response = client.get(f"/pdf/documents/{fake_doc_id}", auth=basic_auth_creds)
 
     assert response.status_code == 404
     assert "Document not found" in response.json()["detail"]
 
-def test_upload_non_pdf_file(auth_token):
+
+def test_upload_non_pdf_file(basic_auth_creds):
     """Test uploading a non-PDF file should fail"""
     txt_content = b"This is not a PDF file."
 
     files = {"files": ("test.txt", txt_content, "text/plain")}
-    headers = {"Authorization": f"Bearer {auth_token}"}
-
-    response = client.post("/pdf/upload", files=files, headers=headers)
+    response = client.post("/pdf/upload", files=files, auth=basic_auth_creds)
 
     assert response.status_code == 400
     assert "is not a PDF" in response.json()["detail"]
 
+
 def test_unauthorized_access():
     """Test accessing endpoints without authentication"""
-    response = client.get("/pdf/documents/some-id")
-    assert response.status_code == 401
+    response = client.get("/pdf/documents/some-id")  # No auth
+    assert response.status_code == 401  # Should be 401 Unauthorized
 
     pdf_content = create_sample_pdf()
     files = {"files": ("test.pdf", pdf_content, "application/pdf")}

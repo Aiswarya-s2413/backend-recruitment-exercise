@@ -3,10 +3,15 @@ from dotenv import load_dotenv
 load_dotenv()
 from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.responses import JSONResponse
-from app import schemas, utils, auth, exceptions
-from app.logger import get_logger
+from . import schemas, utils, auth, exceptions
+from .logger import get_logger
 import uuid
 import time
+import os
+import requests
+from requests.auth import HTTPBasicAuth
+
+PDF_SERVICE_URL = os.getenv("PDF_SERVICE_URL", "http://pdf_service:8000")
 
 app = FastAPI(title="RAG Module")
 
@@ -16,7 +21,7 @@ logger = get_logger(__name__)
 # Global exception handlers
 @app.exception_handler(exceptions.RAGException)
 async def rag_exception_handler(request: Request, exc: exceptions.RAGException):
-    logger.error(f"RAG Exception: {exc.error_code} - {exc.detail}")
+    logger.error(f"RAG Exception: {exc.error_code} - {exc.detail}", exc_info=True)
     return JSONResponse(
         status_code=exc.status_code,
         content={
@@ -28,7 +33,7 @@ async def rag_exception_handler(request: Request, exc: exceptions.RAGException):
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
-    logger.error(f"HTTP Exception: {exc.status_code} - {exc.detail}")
+    logger.error(f"HTTP Exception: {exc.status_code} - {exc.detail}", exc_info=True)
     return JSONResponse(
         status_code=exc.status_code,
         content={
@@ -53,40 +58,35 @@ async def general_exception_handler(request: Request, exc: Exception):
 
 
 @app.post("/rag/index")
-def index_documents(request: schemas.IndexRequest):
+async def index_documents(request: schemas.IndexRequest, current_user: str = Depends(auth.verify_token)):
     logger.info(f"Indexing documents: {request.document_ids}")
     results = []
 
-    try:
-        for doc_id in request.document_ids:
-            try:
-                text = utils.get_document_text(doc_id)
-                logger.info(f"Processing document: {doc_id}")
+    for doc_id in request.document_ids:
+        try:
+            text = utils.get_document_text(doc_id)
+            logger.info(f"Processing document: {doc_id}")
 
-                chunks = utils.text_splitter.split_text(text)
-                logger.info(f"Split document {doc_id} into {len(chunks)} chunks")
+            chunks = utils.text_splitter.split_text(text)
+            logger.info(f"Split document {doc_id} into {len(chunks)} chunks")
 
-                embeddings = utils.embed_texts(chunks)
-                logger.info(f"Generated embeddings for {len(embeddings)} chunks")
+            embeddings = utils.embed_texts(chunks)
+            logger.info(f"Generated embeddings for {len(embeddings)} chunks")
 
-                # Upsert to Pinecone
-                to_upsert = [(f"{doc_id}_{i}", emb, {"doc_id": doc_id, "text": chunk}) for i, (emb, chunk) in enumerate(zip(embeddings, chunks))]
-                utils.index.upsert(vectors=to_upsert)
-                logger.info(f"Successfully indexed document: {doc_id}")
-                results.append({"doc_id": doc_id, "status": "success"})
-            except Exception as e:
-                logger.error(f"Error indexing document {doc_id}: {str(e)}")
-                results.append({"doc_id": doc_id, "status": "failure", "reason": str(e)})
-                continue
-        logger.info(f"Indexing completed. Success: {len([r for r in results if r["status"] == "success"])}, Failures: {len([r for r in results if r["status"] == "failure"])}")
-        return {"results": results}
-
-    except Exception as e:
-        logger.error(f"Unexpected error during indexing: {str(e)}")
-        raise exceptions.IndexError("Failed to index documents")
+            # Upsert to Pinecone
+            to_upsert = [(f"{doc_id}_{i}", emb, {"doc_id": doc_id, "text": chunk}) for i, (emb, chunk) in enumerate(zip(embeddings, chunks))]
+            utils.index.upsert(vectors=to_upsert)
+            logger.info(f"Successfully indexed document: {doc_id}")
+            results.append({"doc_id": doc_id, "status": "success"})
+        except Exception as e:
+            logger.error(f"Error indexing document {doc_id}: {e}", exc_info=True)
+            results.append({"doc_id": doc_id, "status": "failure", "reason": str(e)})
+            continue
+    logger.info(f"Indexing completed. Success: {len([r for r in results if r['status'] == 'success'])}, Failures: {len([r for r in results if r['status'] == 'failure'])}")
+    return {"results": results}
 
 @app.post("/rag/query", response_model=schemas.QueryResponse)
-def query_rag(request: schemas.QueryRequest):
+async def query_rag(request: schemas.QueryRequest, current_user: str = Depends(auth.verify_token)):
     logger.info(f"RAG query request: {request.question[:50]}...")
     start_time = time.time()
     run_id = str(uuid.uuid4())
@@ -145,7 +145,7 @@ def query_rag(request: schemas.QueryRequest):
         )
     
     except Exception as e:
-        logger.error(f"Error during RAG query: {str(e)}")
+        logger.error(f"Error during RAG query: {e}", exc_info=True)
         # Send failure metrics
         try:
             failure_metrics = {

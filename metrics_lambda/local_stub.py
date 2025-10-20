@@ -2,6 +2,7 @@ import os
 import logging
 from fastapi import FastAPI, Request, HTTPException
 from datetime import datetime
+from decimal import Decimal
 import boto3
 
 app = FastAPI(title="metrics_stub")
@@ -19,7 +20,19 @@ logger.setLevel(logging.INFO)
 @app.post("/metrics")
 async def receive_metrics(req: Request):
     try:
-        payload = await req.json()
+        # Check content type
+        content_type = req.headers.get("content-type", "")
+        if not content_type.lower().startswith("application/json"):
+            logger.error(f"Invalid content-type: {content_type}")
+            raise HTTPException(status_code=400, detail="Content-Type must be application/json")
+
+        # Parse JSON with better error handling
+        try:
+            payload = await req.json()
+        except Exception as json_error:
+            logger.error(f"Failed to parse JSON: {str(json_error)}")
+            raise HTTPException(status_code=400, detail="Invalid JSON in request body")
+
         logger.info(f"Received metrics payload: {payload}")
 
         run_id = payload.get("run_id")
@@ -34,8 +47,8 @@ async def receive_metrics(req: Request):
             "agent_name": payload.get("agent_name"),
             "tokens_consumed": payload.get("tokens_consumed", 0),
             "tokens_generated": payload.get("tokens_generated", 0),
-            "response_time_ms": payload.get("response_time_ms", 0.0),
-            "confidence_score": payload.get("confidence_score", 0.0),
+            "response_time_ms": Decimal(str(payload.get("response_time_ms", 0.0))),
+            "confidence_score": Decimal(str(payload.get("confidence_score", 0.0))),
             "status": payload.get("status", "unknown")
         }
         table = dynamodb.Table(METRICS_TABLE)

@@ -1,7 +1,8 @@
 import os
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
+from decimal import Decimal
 import boto3
 
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
@@ -37,15 +38,15 @@ def store_agent_metrics(event, context):
             logger.warning("Missing run_id in payload")
             return {"statusCode": 400, "body": json.dumps({"error": "Missing run_id"})}
 
-        timestamp = datetime.utcnow().isoformat()
+        timestamp = datetime.now(timezone.utc).isoformat()
         item = {
             "run_id": run_id,
             "timestamp": timestamp,
             "agent_name": payload.get("agent_name"),
             "tokens_consumed": payload.get("tokens_consumed", 0),
             "tokens_generated": payload.get("tokens_generated", 0),
-            "response_time_ms": payload.get("response_time_ms", 0.0),
-            "confidence_score": payload.get("confidence_score", 0.0),
+            "response_time_ms": Decimal(str(payload.get("response_time_ms", 0.0))),
+            "confidence_score": Decimal(str(payload.get("confidence_score", 0.0))),
             "status": payload.get("status", "unknown")
         }
 

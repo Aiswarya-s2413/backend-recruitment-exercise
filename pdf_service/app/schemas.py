@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from datetime import datetime
 
 class DocumentBase(BaseModel):
@@ -13,5 +13,4 @@ class DocumentResponse(DocumentBase):
     extracted_text: str
     file_location: str
 
-    class Config:
-        orm_mode = True
+    model_config = ConfigDict(from_attributes=True)

@@ -1,22 +1,24 @@
 import pytest
 from fastapi.testclient import TestClient
 from unittest.mock import patch, MagicMock
-from app.main import app
-from app import schemas
+from rag_module.app.main import app
+from rag_module.app import schemas
 import uuid
+import os
+import numpy as np
+
+os.environ["SERVICE_TOKEN"] = "test-service-token"
 
 client = TestClient(app)
 
-@pytest.fixture
-def auth_token():
-    # Use dummy credentials
-    response = client.post("/auth/login", data={"username": "admin", "password": "password"})
-    assert response.status_code == 200
-    return response.json()["access_token"]
+@pytest.fixture(scope="module")
+def service_token():
+    # A dummy token for testing inter-service communication
+    return "test-service-token"
 
 def test_chunking_logic():
     """Test chunking logic on a long text"""
-    from app.utils import text_splitter
+    from rag_module.app.utils import text_splitter
 
     long_text = "This is a test sentence. " * 50  # Repeat to make it long
 
@@ -36,13 +38,14 @@ def test_chunking_logic():
 
 def test_embedding_logic():
     """Test embedding logic by mocking the embedding API"""
-    from app.utils import embed_texts
+    from rag_module.app.utils import embed_texts
 
     test_texts = ["This is a test sentence.", "Another test sentence."]
 
     # Mock the embedding model
-    with patch("app.utils.embedding_model") as mock_model:
-        mock_embeddings = [[0.1] * 384, [0.2] * 384]  # Mock 384-dim embeddings
+    with patch("rag_module.app.utils.embedding_model") as mock_model:
+        # Create a numpy array for the mock return value
+        mock_embeddings = np.array([[0.1] * 384, [0.2] * 384])
         mock_model.encode.return_value = mock_embeddings
 
         embeddings = embed_texts(test_texts)
@@ -52,11 +55,11 @@ def test_embedding_logic():
         assert len(embeddings[1]) == 384
         mock_model.encode.assert_called_once_with(test_texts)
 
-@patch("app.utils.index")
-@patch("app.utils.embed_texts")
-@patch("app.utils.get_document_text")
-@patch("app.utils.send_metrics")
-def test_rag_query_endpoint(mock_send_metrics, mock_get_text, mock_embed, mock_index, auth_token):
+@patch("rag_module.app.utils.index")
+@patch("rag_module.app.utils.embed_texts")
+@patch("rag_module.app.utils.get_document_text")
+@patch("rag_module.app.utils.send_metrics")
+def test_rag_query_endpoint(mock_send_metrics, mock_get_text, mock_embed, mock_index, service_token):
     """Test the /rag/query endpoint with stubbing"""
     # Mock document text retrieval
     mock_get_text.return_value = "This is sample document text for testing."
@@ -74,7 +77,7 @@ def test_rag_query_endpoint(mock_send_metrics, mock_get_text, mock_embed, mock_i
     mock_index.query.return_value = mock_query_response
 
     # Mock LLM response
-    with patch("app.utils.call_llm") as mock_llm:
+    with patch("rag_module.app.utils.call_llm") as mock_llm:
         mock_llm.return_value = {
             "answer": "This is a test answer.",
             "tokens_consumed": 100,
@@ -85,7 +88,7 @@ def test_rag_query_endpoint(mock_send_metrics, mock_get_text, mock_embed, mock_i
             "document_ids": ["doc1", "doc2"],
             "question": "What is this about?"
         }
-        headers = {"Authorization": f"Bearer {auth_token}"}
+        headers = {"Authorization": f"Bearer {service_token}"}
 
         response = client.post("/rag/query", json=request_data, headers=headers)
 
@@ -119,20 +122,21 @@ def test_rag_query_endpoint(mock_send_metrics, mock_get_text, mock_embed, mock_i
         assert metrics_call["confidence_score"] == expected_confidence
         assert metrics_call["status"] == "completed"
 
-@patch("app.utils.index")
-@patch("app.utils.embed_texts")
-@patch("app.utils.get_document_text")
-@patch("app.utils.send_metrics")
-def test_rag_index_endpoint(mock_send_metrics, mock_get_text, mock_embed, mock_index, auth_token):
+@patch("rag_module.app.utils.index")
+@patch("rag_module.app.utils.embed_texts")
+@patch("rag_module.app.utils.get_document_text")
+@patch("rag_module.app.utils.send_metrics")
+def test_rag_index_endpoint(mock_send_metrics, mock_get_text, mock_embed, mock_index, service_token):
     """Test the /rag/index endpoint"""
-    # Mock document text
-    mock_get_text.return_value = "Sample document text for indexing."
+    # Mock document text - make it long enough to create 2 chunks
+    long_text = "Sample document text for indexing. " * 50  # Create a longer text
+    mock_get_text.return_value = long_text
 
-    # Mock embeddings
-    mock_embed.return_value = [[0.1] * 384, [0.2] * 384]  # Two chunks
+    # Mock embeddings - return 2 embeddings for 2 chunks
+    mock_embed.return_value = [[0.1] * 384, [0.2] * 384]
 
-    request_data = ["doc1"]
-    headers = {"Authorization": f"Bearer {auth_token}"}
+    request_data = {"document_ids": ["doc1"]}
+    headers = {"Authorization": f"Bearer {service_token}"}
 
     response = client.post("/rag/index", json=request_data, headers=headers)
 
@@ -155,11 +159,11 @@ def test_rag_index_endpoint(mock_send_metrics, mock_get_text, mock_embed, mock_i
         assert len(vector[1]) == 384
         assert vector[2]["doc_id"] == "doc1"
 
-def test_invalid_query_request(auth_token):
+def test_invalid_query_request(service_token):
     """Test query endpoint with invalid data"""
     # Empty document_ids
     request_data = {"document_ids": [], "question": "Test question"}
-    headers = {"Authorization": f"Bearer {auth_token}"}
+    headers = {"Authorization": f"Bearer {service_token}"}
 
     response = client.post("/rag/query", json=request_data, headers=headers)
     assert response.status_code == 422  # Validation error
@@ -174,13 +178,13 @@ def test_invalid_query_request(auth_token):
     response = client.post("/rag/query", json=request_data, headers=headers)
     assert response.status_code == 422
 
-@patch("app.utils.get_document_text")
-def test_index_with_error(mock_get_text, auth_token):
+@patch("rag_module.app.utils.get_document_text")
+def test_index_with_error(mock_get_text, service_token):
     """Test indexing when document retrieval fails"""
     mock_get_text.side_effect = Exception("Document not found")
 
-    request_data = ["doc1"]
-    headers = {"Authorization": f"Bearer {auth_token}"}
+    request_data = {"document_ids": ["doc1"]}
+    headers = {"Authorization": f"Bearer {service_token}"}
 
     response = client.post("/rag/index", json=request_data, headers=headers)
 
@@ -191,8 +195,17 @@ def test_index_with_error(mock_get_text, auth_token):
 
 def test_unauthorized_access():
     """Test accessing endpoints without authentication"""
+    # Test without Authorization header
     response = client.post("/rag/query", json={"document_ids": ["doc1"], "question": "test"})
     assert response.status_code == 401
 
-    response = client.post("/rag/index", json=["doc1"])
+    response = client.post("/rag/index", json={"document_ids": ["doc1"]})
+    assert response.status_code == 401
+    
+    # Test with invalid token
+    headers = {"Authorization": "Bearer invalid-token"}
+    response = client.post("/rag/query", json={"document_ids": ["doc1"], "question": "test"}, headers=headers)
+    assert response.status_code == 401
+    
+    response = client.post("/rag/index", json={"document_ids": ["doc1"]}, headers=headers)
     assert response.status_code == 401
